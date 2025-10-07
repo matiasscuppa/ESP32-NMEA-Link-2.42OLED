@@ -11,7 +11,7 @@ Runs on **both cores**: networking/HTTP on Core 0, NMEA/LED on Core 1 for a smoo
 
 ## 🔄 What’s new in this update (vs original)
 
-- **OLED polish**
+- **OLED Display**
   - Centered **splash** with progress bar and extra spacing between “Themys SA” and the bar (no “Initializing…” text).
   - Compact, always-oneline header: **`Mode: MON|GEN`** and **`Baud: N`** with a space after `:`; auto-shortens if it ever gets tight.
   - **Dynamic two-column sensor list** with **vertical centering** (no “corner clustering” when 3–4 sensors); list starts **empty** on boot.
