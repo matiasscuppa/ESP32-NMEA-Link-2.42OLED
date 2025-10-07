@@ -9,6 +9,35 @@ Runs on **both cores**: networking/HTTP on Core 0, NMEA/LED on Core 1 for a smoo
 
 ---
 
+## 🔄 What’s new in this update (vs original)
+
+- **OLED polish**
+  - Centered **splash** with progress bar and extra spacing between “Themys SA” and the bar (no “Initializing…” text).
+  - Compact, always-oneline header: **`Mode: MON|GEN`** and **`Baud: N`** with a space after `:`; auto-shortens if it ever gets tight.
+  - **Dynamic two-column sensor list** with **vertical centering** (no “corner clustering” when 3–4 sensors); list starts **empty** on boot.
+  - **RUN / PAUSE** indicator at bottom-right in both modes.
+  - **CUSTOM** now appears on the OLED when generating custom frames.
+
+- **UX & stability**
+  - **Menu stops everything**: switching to `/` halts Monitor & Generator cleanly.
+  - Monitor/Generator do **not** auto-pause unexpectedly (state is honored until user changes it).
+  - **115200 layout fixed**: header never overlaps or truncates.
+  - Sensor “presence” persists visually for **8 s** for a more natural feel.
+
+- **Web UI refinements**
+  - Dark, mobile-friendly UI; System UI fonts + monospace for consoles.
+  - Generator editor hides `*HH` and **recomputes checksum live**.
+  - Full-width **Back to NMEA Monitor** button; clearer controls & labels.
+
+- **LED feedback & logging**
+  - NeoPixel (GPIO 48): **boot cyan**, **valid RX green**, **invalid RX red**, **TX blue**.
+  - **Quiet logs**: only boot information on Serial (no frame/UI spam).
+
+- **Network**
+  - Valid monitor frames and all generator frames go out via **UDP 10110** to AP broadcast.
+
+---
+
 ## 🛠️ Features
 
 - **Wi-Fi AP**: `SSID: NMEA_Link`, `password: 12345678`, with **captive portal** (auto-opens the web UI).
@@ -26,16 +55,6 @@ Runs on **both cores**: networking/HTTP on Core 0, NMEA/LED on Core 1 for a smoo
     - **Per-slot interval**: 0.1 s / 0.5 s / 1 s / 2 s.
     - Slot enable/disable.
   - **Start/Pause**, **Clear output**, and full-width **Back to NMEA Monitor**.
-- **OLED 128×64 (SSD1309 SPI)**
-  - Centered splash with progress bar and extra spacing.
-  - Compact header: `Mode: MON|GEN` and `Baud: N` (with a space after `:`; fits even at **115200**; auto-shortens if needed).
-  - **Dynamic two-column sensor list** (monitor = detected recently; generator = generated recently), **centered vertically**; starts **empty** on boot.
-  - Bottom-right **RUN / PAUSE** indicator.
-- **LED states (NeoPixel GPIO 48)**
-  - Cyan: boot · Green: valid RX · Red: invalid RX · Blue: Generator TX.
-- **OTA update** page: upload `.bin` and auto-reboot.
-- **Quiet logs**: only boot info on serial (no frame/UI spam).
-- **Safety**: Monitor and Generator do **not** run at the same time. Switching pages **pauses** the previous mode. Returning to **Menu** stops everything.
 
 ---
 
