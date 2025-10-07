@@ -1,4 +1,4 @@
-# ESP32 NMEA Link
+# ESP32 NMEA Link + OLED Display + OTA Update
 
 Access Point + captive portal that serves a **web UI** with two modes:
 
