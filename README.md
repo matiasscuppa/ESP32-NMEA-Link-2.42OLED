@@ -104,13 +104,21 @@ Tested with PlatformIO on **ESP32-S3-DevKitC-1**.
 ### 📑 Supported sentences (NMEA 0183)
 
 **GPS**: GLL, RMC, VTG, GGA, GSA, GSV, DTM, ZDA, GNS, GST, GBS, GRS, RMB, RTE, BOD, XTE  
-**WEATHER**: MWD, MWV, VWR, VWT, MTW, MTA, MMB, MHU, MDA  
+
+**WEATHER**: MWD, MWV, VWR, VWT, MTW, MTA, MMB, MHU, MDA 
+
 **HEADING**: HDG, HDT, HDM, THS, ROT, RSA  
+
 **SOUNDER**: DBT, DPT, DBK, DBS  
+
 **VELOCITY**: VHW, VLW, VBW  
+
 **RADAR**: TLL, TTM, TLB, OSD  
+
 **TRANSDUCER**: XDR  
+
 **AIS**: AIVDM, AIVDO  
+
 **CUSTOM**: free-form (editor with auto checksum)
 
 ---
