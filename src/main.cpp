@@ -111,8 +111,9 @@ volatile bool     otaActive = false;
 volatile uint32_t bootStartMs = 0;
 
 // Persistencia de detección
-const uint32_t SENSOR_PRESENT_TTL_MS = 8000;   // 8s
-const uint32_t SPLASH_MS             = 2500;   // 2.5s
+const uint32_t SENSOR_PRESENT_TTL_MS = 8000;   // 8s (marca “visto” por consola/web)
+const uint32_t SPLASH_MS             = 2500;   // 2.5s splash
+const uint32_t OLED_IDLE_WINDOW_MS   = 3500;   // ventana para mostrar sensores en OLED
 
 // Marcas de última detección/generación por sensor (incluye CUSTOM)
 struct SensorTrack {
@@ -308,6 +309,120 @@ void pushGen(const String& line){
   xSemaphoreGive(genBufMutex);
 }
 
+/* ===========================================================
+   SOPORTE IEC61162-450 (UdPbC) + NMEA Tag Block (\ ... \)
+   -----------------------------------------------------------
+   - parseNMEALine() recibe una línea cruda y devuelve:
+       outSentence: sentencia limpia ($/! ... *CS)
+       metaStr:     metadatos parseados de tag block (p.ej. "s=ID c=123456 n=1")
+       hadTag / hadUdPbC: flags
+   - Si hay tag block, se valida checksum si está presente.
+   - Si hay prefijo UdPbC (con o sin coma), se salta hasta el primer '$' o '!'.
+   =========================================================== */
+
+static String trimCopy(const String& in){
+  String t=in; t.trim(); return t;
+}
+static int idxOfFirstSentenceStart(const String& s){
+  int i1 = s.indexOf('$');
+  int i2 = s.indexOf('!');
+  if(i1<0) return i2;
+  if(i2<0) return i1;
+  return (i1<i2)? i1 : i2;
+}
+static bool parseHexByte(const String& hh, uint8_t &val){
+  if(hh.length()<2) return false;
+  char c1=hh[0], c2=hh[1];
+  auto nib=[&](char c)->int{
+    if(c>='0'&&c<='9') return c-'0';
+    if(c>='A'&&c<='F') return 10 + (c-'A');
+    if(c>='a'&&c<='f') return 10 + (c-'a');
+    return -1;
+  };
+  int n1=nib(c1), n2=nib(c2);
+  if(n1<0||n2<0) return false;
+  val=(uint8_t)((n1<<4)|n2);
+  return true;
+}
+static bool verifyTagChecksum(const String& inner){
+  // inner: "s:ID,c:123,n:1*HH"  (sin las barras invertidas)
+  int asterisk = inner.lastIndexOf('*');
+  if(asterisk<0 || asterisk+2 >= inner.length()) return true; // si no está, no invalidamos
+  String payload = inner.substring(0, asterisk);
+  String hh = inner.substring(asterisk+1);
+  if(hh.length()<2) return false;
+  uint8_t want=0; if(!parseHexByte(hh.substring(0,2), want)) return false;
+  uint8_t cs=0; for(size_t i=0;i<payload.length();++i) cs ^= (uint8_t)payload[i];
+  return (cs==want);
+}
+static void parseTagPairs(const String& inner, String &meta){
+  // quitamos cualquier "*HH" al final
+  int asterisk = inner.lastIndexOf('*');
+  String body = (asterisk>0)? inner.substring(0,asterisk) : inner;
+  // pares separados por coma, clave:valor
+  meta = "";
+  int start=0;
+  while(start < body.length()){
+    int comma = body.indexOf(',', start);
+    String tok = (comma<0)? body.substring(start) : body.substring(start, comma);
+    tok.trim();
+    int colon = tok.indexOf(':');
+    if(colon>0){
+      String key = tok.substring(0, colon); key.trim();
+      String val = tok.substring(colon+1);  val.trim();
+      if(meta.length()) meta += " ";
+      meta += key + "=" + val;
+    }
+    if(comma<0) break;
+    start = comma+1;
+  }
+}
+
+static bool parseNMEALine(const String& rawIn, String &outSentence, String &outMeta, bool &hadTag, bool &hadUdPbC){
+  outSentence = ""; outMeta = ""; hadTag=false; hadUdPbC=false;
+  String s = trimCopy(rawIn);
+  if(s.length()==0) return false;
+
+  // 1) Tag Block: comienza con '\', termina en la próxima '\'
+  if(s[0]=='\\'){
+    int end = s.indexOf('\\', 1);
+    if(end>1){
+      String inner = s.substring(1, end);   // sin barras
+      hadTag = true;
+      if(verifyTagChecksum(inner)){
+        parseTagPairs(inner, outMeta);      // meta en "k=v k=v ..."
+      } else {
+        // checksum inválido: igual lo aceptamos, marcamos meta
+        parseTagPairs(inner, outMeta);
+        if(outMeta.length()) outMeta += " ";
+        outMeta += "cs=BAD";
+      }
+      s = s.substring(end+1);               // resto debería empezar con '$' o '!'
+      s.trim();
+    }
+  }
+
+  // 2) Prefijo UdPbC: detectarlo y saltar al primer '$' o '!'
+  // A veces viene "UdPbC,$GPRMC..." o "UdPbC, !AIVDM..."
+  if(s.startsWith("UdPbC") || s.startsWith("UDPBC") || s.startsWith("udpbc") || s.startsWith("udPbc")){
+    hadUdPbC = true;
+    int pos = idxOfFirstSentenceStart(s);
+    if(pos>=0) s = s.substring(pos);
+  }
+
+  // 3) Si aún no empieza por '$'/'!' buscar el primer token válido
+  if(!(s.startsWith("$")||s.startsWith("!"))){
+    int pos = idxOfFirstSentenceStart(s);
+    if(pos<0) return false;
+    s = s.substring(pos);
+  }
+
+  // 4) Ahora s debe ser una sentencia válida
+  // Opcional: asegurar que tenga "*hh" al final; si no, no tocamos.
+  outSentence = s;
+  return true;
+}
+
 // ============ Serial control ============
 void startSerial(int baud){
   xSemaphoreTake(serialMutex,portMAX_DELAY);
@@ -366,6 +481,7 @@ void handleMenu(){
     "function apply(){document.getElementById('ttl').innerText=L[lang].t||'NMEA Link';document.getElementById('b1').innerText=L[lang].m;document.getElementById('b2').innerText=L[lang].g;document.getElementById('b3').innerText=L[lang].o;document.getElementById('lang').value=lang;}"
     "async function goMon(){try{await fetch('/togglegen?state=0');await fetch('/setmonitor?state=0');await fetch('/setmode?m=monitor');}catch(e){} location.href='/monitor';}"
     "async function goGen(){try{await fetch('/togglegen?state=0');await fetch('/setmonitor?state=0');await fetch('/setmode?m=generator');}catch(e){} location.href='/generator';}"
+    // FIX: 'togglegen' correcto
     "async function goOTA(){try{await fetch('/togglegen?state=0');await fetch('/setmonitor?state=0');}catch(e){} location.href='/update';}"
     "document.addEventListener('DOMContentLoaded',apply);"
     "</script></body></html>";
@@ -422,19 +538,22 @@ void handleMonitor(){
     "const Lb={en:{pause:'⏸ Pause',resume:'▶ Start',clear:'🧹 Clear'},"
     "es:{pause:'⏸ Pausar',resume:'▶ Iniciar',clear:'🧹 Limpiar'},"
     "fr:{pause:'⏸ Pause',resume:'▶ Démarrer',clear:'🧹 Effacer'}};"
-    "const cat={en:{GPS:'GPS',AIS:'AIS',SOUNDER:'SOUNDER',VELOCITY:'VELOCITY',HEADING:'HEADING',RADAR:'RADAR',WEATHER:'WEATHER',TRANSDUCER:'TRANSDUCER',OTROS:'OTHER'},"
-    "es:{GPS:'GPS',AIS:'AIS',SOUNDER:'SOUNDER',VELOCITY:'VELOCITY',HEADING:'HEADING',RADAR:'RADAR',WEATHER:'WEATHER',TRANSDUCER:'TRANSDUCER',OTROS:'OTROS'},"
-    "fr:{GPS:'GPS',AIS:'AIS',SOUNDER:'SOUNDER',VELOCITY:'VELOCITY',HEADING:'HEADING',RADAR:'RADAR',WEATHER:'WEATHER',TRANSDUCER:'TRANSDUCER',OTROS:'AUTRES'}};"
+    // CLAVES CONSISTENTES; cambia solo el texto
+    "const cat={"
+      "en:{GPS:'GPS',AIS:'AIS',SOUNDER:'SOUNDER',VELOCITY:'VELOCITY',HEADING:'HEADING',RADAR:'RADAR',WEATHER:'WEATHER',TRANSDUCER:'TRANSDUCER',OTROS:'OTHER'},"
+      "es:{GPS:'GPS',AIS:'AIS',SOUNDER:'ECOSONDA',VELOCITY:'VELOCIDAD',HEADING:'RUMBO',RADAR:'RADAR',WEATHER:'METEO',TRANSDUCER:'TRANSDUCTOR',OTROS:'OTROS'},"
+      "fr:{GPS:'GPS',AIS:'AIS',SOUNDER:'SONDEUR',VELOCITY:'VITESSE',HEADING:'CAP',RADAR:'RADAR',WEATHER:'MÉTÉO',TRANSDUCER:'TRANSDUCTEUR',OTROS:'AUTRES'}"
+    "};"
     "let filters=['GPS','AIS','SOUNDER','VELOCITY','HEADING','RADAR','WEATHER','TRANSDUCER','OTROS'];let filtersState={};filters.forEach(f=>filtersState[f]=true);"
     "let paused=true, intervalMs=1000, intervalId=null;"
     "function setLang(l){lang=l;localStorage.setItem('lang',l);applyLang();}"
     "function applyLang(){document.getElementById('pauseBtn').innerText=paused?Lb[lang].resume:Lb[lang].pause;document.getElementById('clearBtn').innerText=Lb[lang].clear;drawFilters();}"
-    "function drawFilters(){let c=document.getElementById('filterC');c.innerHTML='';filters.forEach(f=>{let b=document.createElement('button');b.type='button';b.className='fbtn '+f;if(filtersState[f])b.classList.add('active');b.innerText=cat[lang][f];b.onclick=()=>{filtersState[f]=!filtersState[f];b.classList.toggle('active',filtersState[f]);};c.appendChild(b);});let all=document.createElement('button');all.type='button';all.className='fbtn';all.innerText='ALL/NONE';all.onclick=()=>{let any=Object.values(filtersState).some(v=>v);Object.keys(filtersState).forEach(k=>filtersState[k]=!any);drawFilters();};c.appendChild(all);}"
+    "function drawFilters(){let c=document.getElementById('filterC');c.innerHTML='';filters.forEach(f=>{let b=document.createElement('button');b.type='button';b.className='fbtn '+f;if(filtersState[f])b.classList.add('active');b.innerText=cat[lang][f]||f;b.onclick=()=>{filtersState[f]=!filtersState[f];b.classList.toggle('active',filtersState[f]);};c.appendChild(b);});let all=document.createElement('button');all.type='button';all.className='fbtn';all.innerText='ALL/NONE';all.onclick=()=>{let any=Object.values(filtersState).some(v=>v);Object.keys(filtersState).forEach(k=>filtersState[k]=!any);drawFilters();};c.appendChild(all);}"
     "function togglePause(){paused=!paused;applyLang();fetch('/setmonitor?state='+(paused?0:1)).catch(()=>{});}"
     "function clearConsole(){document.getElementById('console').innerHTML='';fetch('/clearnmea').catch(()=>{});}"
     "async function setBaud(b){await fetch('/setbaud?baud='+b).catch(()=>{});document.querySelectorAll('.baud').forEach(x=>x.classList.remove('active'));let el=document.getElementById('baud_'+b);if(el)el.classList.add('active');}"
     "function setSpeed(mult,btn){document.querySelectorAll('.btn').forEach(b=>{if(b.innerText.includes('%'))b.classList.remove('active');});btn.classList.add('active');intervalMs=Math.max(100,Math.round(1000/mult));if(intervalId)clearInterval(intervalId);intervalId=setInterval(poll,intervalMs);}"
-    "function poll(){if(paused)return;fetch('/getnmea?ts='+Date.now()).then(r=>r.text()).then(t=>{let c=document.getElementById('console');let lines=t.trim()?t.trim().split('\\n'):[];let visible=lines.filter(l=>{let lb=l.indexOf(']');let type=(lb>0&&l[0]=='[')?l.substring(1,lb):'OTROS';return filtersState[type];});c.innerHTML=visible.map(l=>{let lb=l.indexOf(']');let type=(lb>0&&l[0]=='[')?l.substring(1,lb):'OTROS';let disp=(cat[lang]&&cat[lang][type])?cat[lang][type]:type;let rest=(lb>=0)?l.substring(lb+1):l;return '<span class=\"'+type+'\">['+disp+']'+rest+'</span>';}).join('<br>');c.scrollTop=c.scrollHeight;}).catch(()=>{});}"
+    "function poll(){if(paused)return;fetch('/getnmea?ts='+Date.now()).then(r=>r.text()).then(t=>{let c=document.getElementById('console');let lines=t.trim()?t.trim().split('\\n'):[];let visible=lines.filter(l=>{let lb=l.indexOf(']');let type=(lb>0&&l[0]=='[')?l.substring(1,lb):'OTROS';return filtersState[type];});c.innerHTML=visible.join('<br>');c.scrollTop=c.scrollHeight;}).catch(()=>{});}"
     "async function gotoGen(){paused=true;applyLang();try{await fetch('/setmonitor?state=0');await fetch('/setmode?m=generator');}catch(e){} location.href='/generator';}"
     "async function gotoMenu(){paused=true;try{await fetch('/setmonitor?state=0');await fetch('/togglegen?state=0');}catch(e){} location.href='/';}"
     "document.addEventListener('DOMContentLoaded',async()=>{await fetch('/setmode?m=monitor');try{const st=await (await fetch('/getstatus')).json();paused=!st.monRunning;applyLang();let b=document.getElementById('baud_'+(st.baud||4800));if(b)b.classList.add('active');}catch(e){applyLang();}intervalId=setInterval(poll,intervalMs);});"
@@ -598,7 +717,7 @@ void handleGenerator(){
     " sensorSel.addEventListener('change',async ()=>{refillSent(sensorSel,sentSel);const newSent=sentSel.value;try{await fetch('/gen_slot_sensor?i='+i+'&sensor='+sensorSel.value);await fetch('/gen_slot_sentence?i='+i+'&sentence='+newSent);const r=await fetch('/gen_slot_template?i='+i);const t=await r.text();const ch=(t&&(t[0]==='$'||t[0]==='!'))?t[0]:'';let s=t? t.slice(ch?1:0):'';let star=s.indexOf('*'); if(star>=0) s=s.slice(0,star);txt.value=(ch?s?ch+s:s:s);}catch(e){}});"
     " sentSel.addEventListener('change',async ()=>{try{await fetch('/gen_slot_sentence?i='+i+'&sentence='+sentSel.value);const r=await fetch('/gen_slot_template?i='+i);const t=await r.text();const ch=(t&&(t[0]==='$'||t[0]==='!'))?t[0]:'';let s=t? t.slice(ch?1:0):'';let star=s.indexOf('*'); if(star>=0) s=s.slice(0,star);txt.value=(ch?s?ch+s:s:s);}catch(e){}});"
     " txt.addEventListener('input',e=>{ if(e.target.value.indexOf('*')>=0){ e.target.value=e.target.value.replace(/\\*/g,''); } const full=buildFullFromEditor(e.target.value); fetch('/gen_slot_text',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'i='+i+'&text='+encodeURIComponent(full)}).catch(()=>{});});"
-    "}"
+    "} "
     "function setActive(sel,scope,el){(scope||document).querySelectorAll(sel).forEach(b=>b.classList.remove('active')); if(el) el.classList.add('active');}"
     "function setIntervalSlot(i,ms,btn){fetch('/gen_slot_interval?i='+i+'&ms='+ms).then(()=>{const g=document.getElementById('intgrp_'+i);if(!g)return;setActive('.int-btn',g,btn);}).catch(()=>{});} "
     "async function setGenBaud(b,btn){try{await fetch('/setbaud?baud='+b);setActive('.gen-baud',document,btn);}catch(e){}}"
@@ -695,11 +814,11 @@ void handleGetStatus(){
 }
 
 // ===================== UI (OLED) =====================
-// Fuentes U8g2 (SIEMPRE tamaño compacto en header y lista)
+// Fuentes U8g2
 static const uint8_t *FONT_TITLE     = u8g2_font_8x13B_tf; // splash título
 static const uint8_t *FONT_SUB       = u8g2_font_7x13_tf;  // splash sub
-static const uint8_t *FONT_HDR_SMALL = u8g2_font_5x8_mf;   // encabezado compacto (siempre)
-static const uint8_t *FONT_LIST      = u8g2_font_5x8_mf;   // lista sensores (compacto)
+static const uint8_t *FONT_HDR_SMALL = u8g2_font_5x8_mf;   // encabezado compacto
+static const uint8_t *FONT_LIST      = u8g2_font_5x8_mf;   // lista sensores
 
 void drawCentered(const char* text, int y, const uint8_t* font){
   u8g2.setFont(font);
@@ -716,6 +835,7 @@ void drawRight(const char* text, int y, const uint8_t* font, int xRight=127){
   u8g2.drawStr(x, y, text);
 }
 
+// Splash centrado con panel y barra
 void drawSplash(uint32_t now){
   uint32_t elapsed = now - bootStartMs;
   if(elapsed > SPLASH_MS) elapsed = SPLASH_MS;
@@ -723,7 +843,6 @@ void drawSplash(uint32_t now){
 
   u8g2.clearBuffer();
 
-  // Panel centrado sobrio
   const int panelW = 116;
   const int panelH = 44;
   const int px = (128 - panelW) / 2;
@@ -731,16 +850,14 @@ void drawSplash(uint32_t now){
 
   u8g2.drawRFrame(px, py, panelW, panelH, 4);
 
-  // Títulos
   drawCentered("NMEA Link", py + 16, FONT_TITLE);
-  drawCentered("Themys SA", py + 28, FONT_SUB);  // ↑ subido 2 px
+  drawCentered("Themys SA", py + 28, FONT_SUB);
 
-  // Barra: más abajo y con buen margen inferior
   const int bh = 8;
-  const int bottomPad = 2;                         // margen a borde inferior
+  const int bottomPad = 2;
   const int bx = px + 8;
   const int bw = panelW - 16;
-  const int by = py + panelH - bottomPad - bh;     // ↓ baja 1–2 px respecto a antes
+  const int by = py + panelH - bottomPad - bh;
 
   u8g2.drawRFrame(bx, by, bw, bh, 2);
   int fill = (int)((bw-2) * p);
@@ -750,21 +867,18 @@ void drawSplash(uint32_t now){
   u8g2.sendBuffer();
 }
 
-// Importante: no marcar presente si ts==0
-inline bool isPresentTs(uint32_t ts){
-  if(ts == 0) return false;
-  return (millis() - ts) <= SENSOR_PRESENT_TTL_MS;
+inline bool recentTs(uint32_t ts, uint32_t windowMs){
+  if (ts==0) return false;
+  return (millis() - ts) <= windowMs;
 }
 
-// Header SIEMPRE en compacto (con espacio tras “:”)
+// Header compacto: "Mode: MON/GEN" + "Baud: ####"
 void drawHeader(){
   const char* modeCode = (appMode==MODE_GENERATOR) ? "GEN" : "MON";
-  char left[24];
-  snprintf(left, sizeof(left), "Mode: %s", modeCode);
-  char right[28];
-  snprintf(right, sizeof(right), "Baud: %d", currentBaud);
+  char left[24];  snprintf(left,  sizeof(left),  "Mode: %s", modeCode);
+  char right[24]; snprintf(right, sizeof(right), "Baud: %d", currentBaud);
 
-  const int minSep = 8;
+  const int minSep = 6;
 
   u8g2.setFont(FONT_HDR_SMALL);
   int wL = u8g2.getStrWidth(left);
@@ -777,9 +891,9 @@ void drawHeader(){
     return;
   }
 
-  // Versión ultra-corta si hiciera falta (igual compacto)
+  // Fallback ultra compacto
   const char* leftS  = (appMode==MODE_GENERATOR) ? "M: GEN" : "M: MON";
-  char rightS[20]; snprintf(rightS, sizeof(rightS), "B: %d", currentBaud);
+  char rightS[16]; snprintf(rightS, sizeof(rightS), "B: %d", currentBaud);
   u8g2.drawStr(0, 9, leftS);
   drawRight(rightS, 9, FONT_HDR_SMALL);
   u8g2.drawHLine(0, 12, 128);
@@ -795,12 +909,12 @@ void drawStatus(){
     return;
   }
 
-  // Cabecera (compacta)
+  // Header
   drawHeader();
 
-  // Área de listado
-  const int topY    = 18; // debajo de header
-  const int bottomY = 60; // 63 reservado para estado RUN/PAUSE
+  // ——— Zona de sensores ———
+  const int topY    = 18;
+  const int bottomY = 60;  // 63 reservado para estado RUN/PAUSE
   const int colAX   = 2;
   const int colBX   = 66;
 
@@ -808,19 +922,22 @@ void drawStatus(){
   int nActive = 0;
 
   if(appMode==MODE_GENERATOR){
-    for(int i=0;i<SENSOR_COUNT;i++) if(isPresentTs(sensors[i].lastGenMs)) active[nActive++] = sensors[i].name;
+    for(int i=0;i<SENSOR_COUNT;i++)
+      if(recentTs(sensors[i].lastGenMs, OLED_IDLE_WINDOW_MS))
+        active[nActive++] = sensors[i].name;
   } else {
-    for(int i=0;i<SENSOR_COUNT;i++) if(isPresentTs(sensors[i].lastSeenMs)) active[nActive++] = sensors[i].name;
+    for(int i=0;i<SENSOR_COUNT;i++)
+      if(recentTs(sensors[i].lastSeenMs, OLED_IDLE_WINDOW_MS))
+        active[nActive++] = sensors[i].name;
   }
 
+  // Lista sólo si hay actividad reciente
   u8g2.setFont(FONT_LIST);
-
   if(nActive > 0){
-    // Reparto vertical centrado con paso fijo (compacto)
-    const int rowsPerCol = (nActive + 1) / 2; // ceil(n/2)
+    const int rowsPerCol = (nActive + 1) / 2;  // ceil(n/2)
     const int lineH = 8;
-    const int blockH = (rowsPerCol > 1) ? (rowsPerCol - 1) * lineH : 0;
-    int startY = topY + ((bottomY - topY) - blockH) / 2;
+    const int blockH = (rowsPerCol>1 ? (rowsPerCol-1)*lineH : 0);
+    int startY = topY + ((bottomY - topY) - blockH)/2;
     if(startY < topY) startY = topY;
 
     // Columna A
@@ -835,7 +952,7 @@ void drawStatus(){
     }
   }
 
-  // Estado abajo derecha
+  // Estado RUN/PAUSE abajo a la derecha
   const bool isRun = (appMode==MODE_MONITOR) ? monitorRunning : generatorRunning;
   drawRight(isRun ? "RUN" : "PAUSE", 63, FONT_LIST);
 
@@ -852,7 +969,7 @@ void TaskNet(void*){
 }
 void TaskNMEA(void*){
   for(;;){
-    // MONITOR: solo procesa si está en RUN
+    // MONITOR: sólo procesa si está en RUN
     if(appMode==MODE_MONITOR && monitorRunning){
       xSemaphoreTake(serialMutex,portMAX_DELAY);
       while(NMEA_Serial.available()){
@@ -863,27 +980,41 @@ void TaskNMEA(void*){
 
           xSemaphoreGive(serialMutex);
 
-          String line=currentLine;
+          String raw=currentLine;
           currentLine="";
-          line.trim();
+          raw.trim();
 
-          if(line.length()==0){ xSemaphoreTake(serialMutex,portMAX_DELAY); continue; }
+          if(raw.length()==0){ xSemaphoreTake(serialMutex,portMAX_DELAY); continue; }
 
-          bool valid=processNMEA(line);
+          // --- NUEVO: parseo TagBlock / UdPbC ---
+          String sentence, meta;
+          bool hadTag=false, hadUdPbC=false;
+          bool ok = parseNMEALine(raw, sentence, meta, hadTag, hadUdPbC);
+
+          String effective = ok ? sentence : raw;   // si no se pudo parsear, seguimos con la cruda
+          bool valid = processNMEA(effective);
+
           flashLed(valid?pixels.Color(0,255,0):pixels.Color(255,0,0));
 
-          String type=detectSentenceType(line);
-          if(valid && type!="OTROS"){
-            stampSeen(type);
+          String type=detectSentenceType(effective);
+          if(valid && type!="OTROS"){ stampSeen(type); }
+
+          // Mostrar metadatos si hay
+          String formatted="["+type+"] "+effective;
+          if(hadTag || hadUdPbC){
+            if(meta.length()==0){
+              meta = String(hadUdPbC ? "UdPbC" : "");
+            }
+            formatted += "  ⟨" + meta + "⟩";
           }
-          String formatted="["+type+"] "+line;
 
           xSemaphoreTake(nmeaBufMutex,portMAX_DELAY);
           bufferIndex=(bufferIndex+1)%BUFFER_LINES;
           nmeaBuffer[bufferIndex]=formatted;
           xSemaphoreGive(nmeaBufMutex);
 
-          if(valid) sendUDP(line);
+          // A la red mandamos la sentencia limpia (sin tag ni UdPbC)
+          if(valid) sendUDP(effective);
 
           xSemaphoreTake(serialMutex,portMAX_DELAY);
         }
@@ -928,7 +1059,6 @@ void TaskUI(void*){
     drawSplash(millis());
     vTaskDelay(40);
   }
-
   for(;;){
     drawStatus();
     vTaskDelay(120);
