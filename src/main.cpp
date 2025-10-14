@@ -29,6 +29,9 @@ U8G2_SSD1309_128X64_NONAME0_F_4W_HW_SPI u8g2(
    NMEA Link (ESP32 / ESP32-S3)  —  AP + Menú + Monitor + Generator + OTA
    ============================================================== */
 
+// ===== Versión (para splash) =====
+#define FW_VERSION "v2.42"
+
 // ===== Verbose de arranque (0 = silencioso tras boot) =====
 #define VERBOSE 0
 #if VERBOSE
@@ -377,7 +380,6 @@ static void parseTagPairs(const String& inner, String &meta){
     start = comma+1;
   }
 }
-
 static bool parseNMEALine(const String& rawIn, String &outSentence, String &outMeta, bool &hadTag, bool &hadUdPbC){
   outSentence = ""; outMeta = ""; hadTag=false; hadUdPbC=false;
   String s = trimCopy(rawIn);
@@ -481,7 +483,6 @@ void handleMenu(){
     "function apply(){document.getElementById('ttl').innerText=L[lang].t||'NMEA Link';document.getElementById('b1').innerText=L[lang].m;document.getElementById('b2').innerText=L[lang].g;document.getElementById('b3').innerText=L[lang].o;document.getElementById('lang').value=lang;}"
     "async function goMon(){try{await fetch('/togglegen?state=0');await fetch('/setmonitor?state=0');await fetch('/setmode?m=monitor');}catch(e){} location.href='/monitor';}"
     "async function goGen(){try{await fetch('/togglegen?state=0');await fetch('/setmonitor?state=0');await fetch('/setmode?m=generator');}catch(e){} location.href='/generator';}"
-    // FIX: 'togglegen' correcto
     "async function goOTA(){try{await fetch('/togglegen?state=0');await fetch('/setmonitor?state=0');}catch(e){} location.href='/update';}"
     "document.addEventListener('DOMContentLoaded',apply);"
     "</script></body></html>";
@@ -538,7 +539,7 @@ void handleMonitor(){
     "const Lb={en:{pause:'⏸ Pause',resume:'▶ Start',clear:'🧹 Clear'},"
     "es:{pause:'⏸ Pausar',resume:'▶ Iniciar',clear:'🧹 Limpiar'},"
     "fr:{pause:'⏸ Pause',resume:'▶ Démarrer',clear:'🧹 Effacer'}};"
-    // CLAVES CONSISTENTES; cambia solo el texto
+    // Claves estables (keys) para clases CSS y filtros
     "const cat={"
       "en:{GPS:'GPS',AIS:'AIS',SOUNDER:'SOUNDER',VELOCITY:'VELOCITY',HEADING:'HEADING',RADAR:'RADAR',WEATHER:'WEATHER',TRANSDUCER:'TRANSDUCER',OTROS:'OTHER'},"
       "es:{GPS:'GPS',AIS:'AIS',SOUNDER:'ECOSONDA',VELOCITY:'VELOCIDAD',HEADING:'RUMBO',RADAR:'RADAR',WEATHER:'METEO',TRANSDUCER:'TRANSDUCTOR',OTROS:'OTROS'},"
@@ -550,10 +551,26 @@ void handleMonitor(){
     "function applyLang(){document.getElementById('pauseBtn').innerText=paused?Lb[lang].resume:Lb[lang].pause;document.getElementById('clearBtn').innerText=Lb[lang].clear;drawFilters();}"
     "function drawFilters(){let c=document.getElementById('filterC');c.innerHTML='';filters.forEach(f=>{let b=document.createElement('button');b.type='button';b.className='fbtn '+f;if(filtersState[f])b.classList.add('active');b.innerText=cat[lang][f]||f;b.onclick=()=>{filtersState[f]=!filtersState[f];b.classList.toggle('active',filtersState[f]);};c.appendChild(b);});let all=document.createElement('button');all.type='button';all.className='fbtn';all.innerText='ALL/NONE';all.onclick=()=>{let any=Object.values(filtersState).some(v=>v);Object.keys(filtersState).forEach(k=>filtersState[k]=!any);drawFilters();};c.appendChild(all);}"
     "function togglePause(){paused=!paused;applyLang();fetch('/setmonitor?state='+(paused?0:1)).catch(()=>{});}"
-    "function clearConsole(){document.getElementById('console').innerHTML='';fetch('/clearnmea').catch(()=>{});}"
+    "function clearConsole(){document.getElementById('console').innerHTML='';fetch('/clearnmea').catch(()=>{});} "
     "async function setBaud(b){await fetch('/setbaud?baud='+b).catch(()=>{});document.querySelectorAll('.baud').forEach(x=>x.classList.remove('active'));let el=document.getElementById('baud_'+b);if(el)el.classList.add('active');}"
-    "function setSpeed(mult,btn){document.querySelectorAll('.btn').forEach(b=>{if(b.innerText.includes('%'))b.classList.remove('active');});btn.classList.add('active');intervalMs=Math.max(100,Math.round(1000/mult));if(intervalId)clearInterval(intervalId);intervalId=setInterval(poll,intervalMs);}"
-    "function poll(){if(paused)return;fetch('/getnmea?ts='+Date.now()).then(r=>r.text()).then(t=>{let c=document.getElementById('console');let lines=t.trim()?t.trim().split('\\n'):[];let visible=lines.filter(l=>{let lb=l.indexOf(']');let type=(lb>0&&l[0]=='[')?l.substring(1,lb):'OTROS';return filtersState[type];});c.innerHTML=visible.join('<br>');c.scrollTop=c.scrollHeight;}).catch(()=>{});}"
+    "function setSpeed(mult,btn){document.querySelectorAll('.btn').forEach(b=>{if(b.innerText.includes('%'))b.classList.remove('active');});btn.classList.add('active');intervalMs=Math.max(100,Math.round(1000/mult));if(intervalId)clearInterval(intervalId);intervalId=setInterval(poll,intervalMs);} "
+    // ——— CORREGIDO: render por-color usando <span class="TIPO"> ———
+    "function poll(){"
+      "if(paused)return;"
+      "fetch('/getnmea?ts='+Date.now()).then(r=>r.text()).then(t=>{"
+        "let c=document.getElementById('console');"
+        "let lines=t.trim()?t.trim().split('\\n'):[];"
+        "let visible=lines.filter(l=>{let lb=l.indexOf(']');let type=(lb>0&&l[0]=='[')?l.substring(1,lb):'OTROS';return filtersState[type];});"
+        "c.innerHTML=visible.map(l=>{"
+          "let lb=l.indexOf(']');"
+          "let type=(lb>0&&l[0]=='[')?l.substring(1,lb):'OTROS';"
+          "let disp=(cat[lang]&&cat[lang][type])?cat[lang][type]:type;"
+          "let rest=(lb>=0)?l.substring(lb+1):l;"
+          "return '<span class=\"'+type+'\">['+disp+']'+rest+'</span>';"
+        "}).join('<br>');"
+        "c.scrollTop=c.scrollHeight;"
+      "}).catch(()=>{});"
+    "}"
     "async function gotoGen(){paused=true;applyLang();try{await fetch('/setmonitor?state=0');await fetch('/setmode?m=generator');}catch(e){} location.href='/generator';}"
     "async function gotoMenu(){paused=true;try{await fetch('/setmonitor?state=0');await fetch('/togglegen?state=0');}catch(e){} location.href='/';}"
     "document.addEventListener('DOMContentLoaded',async()=>{await fetch('/setmode?m=monitor');try{const st=await (await fetch('/getstatus')).json();paused=!st.monRunning;applyLang();let b=document.getElementById('baud_'+(st.baud||4800));if(b)b.classList.add('active');}catch(e){applyLang();}intervalId=setInterval(poll,intervalMs);});"
@@ -835,7 +852,7 @@ void drawRight(const char* text, int y, const uint8_t* font, int xRight=127){
   u8g2.drawStr(x, y, text);
 }
 
-// Splash centrado con panel y barra
+// Splash centrado con panel y barra (y versión discreta abajo)
 void drawSplash(uint32_t now){
   uint32_t elapsed = now - bootStartMs;
   if(elapsed > SPLASH_MS) elapsed = SPLASH_MS;
@@ -863,6 +880,9 @@ void drawSplash(uint32_t now){
   int fill = (int)((bw-2) * p);
   if(fill<0) fill=0;
   u8g2.drawBox(bx+1, by+1, fill, bh-2);
+
+  // Versión: abajo a la derecha, chico/disimulado
+  drawRight(FW_VERSION, 63, FONT_HDR_SMALL);
 
   u8g2.sendBuffer();
 }
@@ -931,7 +951,7 @@ void drawStatus(){
         active[nActive++] = sensors[i].name;
   }
 
-  // Lista sólo si hay actividad reciente
+  // Lista sólo si hay actividad reciente; si no, queda “en blanco”
   u8g2.setFont(FONT_LIST);
   if(nActive > 0){
     const int rowsPerCol = (nActive + 1) / 2;  // ceil(n/2)
