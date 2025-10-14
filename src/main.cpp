@@ -25,12 +25,12 @@ U8G2_SSD1309_128X64_NONAME0_F_4W_HW_SPI u8g2(
   /* reset=*/ OLED_RST
 );
 
+// ===== Versión (sólo Splash) =====
+static const char* FW_VERSION = "v1.2.1";
+
 /* ==============================================================
    NMEA Link (ESP32 / ESP32-S3)  —  AP + Menú + Monitor + Generator + OTA
    ============================================================== */
-
-// ===== Versión (para splash) =====
-#define FW_VERSION "v2.42"
 
 // ===== Verbose de arranque (0 = silencioso tras boot) =====
 #define VERBOSE 0
@@ -75,6 +75,9 @@ WebServer server(80);
 String nmeaBuffer[BUFFER_LINES];
 int bufferIndex = 0;
 String currentLine = "";
+unsigned long lineStartMs = 0;            // timeout para líneas rotas
+static const size_t MAX_LINE_LEN = 320;   // tope de seguridad
+static const uint32_t LINE_TIMEOUT_MS = 1200;
 
 #define GEN_BUFFER_LINES 200
 String genBuffer[GEN_BUFFER_LINES];
@@ -314,13 +317,6 @@ void pushGen(const String& line){
 
 /* ===========================================================
    SOPORTE IEC61162-450 (UdPbC) + NMEA Tag Block (\ ... \)
-   -----------------------------------------------------------
-   - parseNMEALine() recibe una línea cruda y devuelve:
-       outSentence: sentencia limpia ($/! ... *CS)
-       metaStr:     metadatos parseados de tag block (p.ej. "s=ID c=123456 n=1")
-       hadTag / hadUdPbC: flags
-   - Si hay tag block, se valida checksum si está presente.
-   - Si hay prefijo UdPbC (con o sin coma), se salta hasta el primer '$' o '!'.
    =========================================================== */
 
 static String trimCopy(const String& in){
@@ -348,9 +344,8 @@ static bool parseHexByte(const String& hh, uint8_t &val){
   return true;
 }
 static bool verifyTagChecksum(const String& inner){
-  // inner: "s:ID,c:123,n:1*HH"  (sin las barras invertidas)
   int asterisk = inner.lastIndexOf('*');
-  if(asterisk<0 || asterisk+2 >= inner.length()) return true; // si no está, no invalidamos
+  if(asterisk<0 || asterisk+2 >= inner.length()) return true; // sin checksum → aceptamos
   String payload = inner.substring(0, asterisk);
   String hh = inner.substring(asterisk+1);
   if(hh.length()<2) return false;
@@ -359,10 +354,8 @@ static bool verifyTagChecksum(const String& inner){
   return (cs==want);
 }
 static void parseTagPairs(const String& inner, String &meta){
-  // quitamos cualquier "*HH" al final
   int asterisk = inner.lastIndexOf('*');
   String body = (asterisk>0)? inner.substring(0,asterisk) : inner;
-  // pares separados por coma, clave:valor
   meta = "";
   int start=0;
   while(start < body.length()){
@@ -385,42 +378,37 @@ static bool parseNMEALine(const String& rawIn, String &outSentence, String &outM
   String s = trimCopy(rawIn);
   if(s.length()==0) return false;
 
-  // 1) Tag Block: comienza con '\', termina en la próxima '\'
+  // Tag Block
   if(s[0]=='\\'){
     int end = s.indexOf('\\', 1);
     if(end>1){
-      String inner = s.substring(1, end);   // sin barras
+      String inner = s.substring(1, end);
       hadTag = true;
-      if(verifyTagChecksum(inner)){
-        parseTagPairs(inner, outMeta);      // meta en "k=v k=v ..."
-      } else {
-        // checksum inválido: igual lo aceptamos, marcamos meta
+      if(verifyTagChecksum(inner)) parseTagPairs(inner, outMeta);
+      else {
         parseTagPairs(inner, outMeta);
         if(outMeta.length()) outMeta += " ";
         outMeta += "cs=BAD";
       }
-      s = s.substring(end+1);               // resto debería empezar con '$' o '!'
+      s = s.substring(end+1);
       s.trim();
     }
   }
 
-  // 2) Prefijo UdPbC: detectarlo y saltar al primer '$' o '!'
-  // A veces viene "UdPbC,$GPRMC..." o "UdPbC, !AIVDM..."
+  // Prefijo UdPbC
   if(s.startsWith("UdPbC") || s.startsWith("UDPBC") || s.startsWith("udpbc") || s.startsWith("udPbc")){
     hadUdPbC = true;
     int pos = idxOfFirstSentenceStart(s);
     if(pos>=0) s = s.substring(pos);
   }
 
-  // 3) Si aún no empieza por '$'/'!' buscar el primer token válido
+  // Buscar primer '$'/'!'
   if(!(s.startsWith("$")||s.startsWith("!"))){
     int pos = idxOfFirstSentenceStart(s);
     if(pos<0) return false;
     s = s.substring(pos);
   }
 
-  // 4) Ahora s debe ser una sentencia válida
-  // Opcional: asegurar que tenga "*hh" al final; si no, no tocamos.
   outSentence = s;
   return true;
 }
@@ -501,11 +489,16 @@ void handleMonitor(){
   ".btnc{display:flex;flex-wrap:wrap;gap:5px;margin:8px 0}.btn{flex:1;padding:10px;background:#111;color:#0f0;border:1px solid #0f0;border-radius:8px;font-size:16px;text-align:center;cursor:pointer}"
   ".btn.active{background:#0f0;color:#000;font-weight:bold}.fbtn{flex:1 1 calc(33.33% - 6px);padding:5px 0;border-radius:5px;margin:2px;text-align:center;transition:.2s;border:1px solid #333}"
   ".fbtn:not(.active){background:#111;color:#666;border-color:#444}.fbtn.active{font-weight:600;border:1px solid #222}"
-  ".fbtn.active.GPS{background:#0ff;color:#000}.GPS{color:#0ff}.fbtn.active.AIS{background:#ff0;color:#000}.AIS{color:#ff0}"
-  ".fbtn.active.SOUNDER{background:#0f0;color:#000}.SOUNDER{color:#0f0}.fbtn.active.VELOCITY{background:#f0f;color:#000}.VELOCITY{color:#f0f}"
-  ".fbtn.active.HEADING{background:#1e90ff;color:#000}.HEADING{color:#1e90ff}.fbtn.active.RADAR{background:#ff4500;color:#000}.RADAR{color:#ff4500}"
-  ".fbtn.active.WEATHER{background:#7fffd4;color:#000}.WEATHER{color:#7fffd4}.fbtn.active.TRANSDUCER{background:#ffa500;color:#000}.TRANSDUCER{color:#ffa500}"
-  ".fbtn.active.OTROS{background:#aaa;color:#000}.OTROS{color:#aaa}footer{text-align:center;color:#666;font-size:12px;margin-top:10px}</style></head><body>");
+  ".fbtn.active.GPS{background:#0ff;color:#000}.GPS{color:#0ff}"
+  ".fbtn.active.AIS{background:#ff0;color:#000}.AIS{color:#ff0}"
+  ".fbtn.active.SOUNDER{background:#0f0;color:#000}.SOUNDER{color:#0f0}"
+  ".fbtn.active.VELOCITY{background:#f0f;color:#000}.VELOCITY{color:#f0f}"
+  ".fbtn.active.HEADING{background:#1e90ff;color:#000}.HEADING{color:#1e90ff}"
+  ".fbtn.active.RADAR{background:#ff4500;color:#000}.RADAR{color:#ff4500}"
+  ".fbtn.active.WEATHER{background:#7fffd4;color:#000}.WEATHER{color:#7fffd4}"
+  ".fbtn.active.TRANSDUCER{background:#ffa500;color:#000}.TRANSDUCER{color:#ffa500}"
+  ".fbtn.active.OTROS{background:#aaa;color:#000}.OTROS{color:#aaa}"
+  "footer{text-align:center;color:#666;font-size:12px;margin-top:10px}</style></head><body>");
 
   html += F("<select id='lang' class='lang' onchange='setLang(this.value)'><option value='en'>EN</option><option value='es'>ES</option><option value='fr'>FR</option></select>"
             "<h2 id='title'>NMEA Reader</h2><div class='btnc' id='filterC'></div><div id='console'></div>");
@@ -539,7 +532,6 @@ void handleMonitor(){
     "const Lb={en:{pause:'⏸ Pause',resume:'▶ Start',clear:'🧹 Clear'},"
     "es:{pause:'⏸ Pausar',resume:'▶ Iniciar',clear:'🧹 Limpiar'},"
     "fr:{pause:'⏸ Pause',resume:'▶ Démarrer',clear:'🧹 Effacer'}};"
-    // Claves estables (keys) para clases CSS y filtros
     "const cat={"
       "en:{GPS:'GPS',AIS:'AIS',SOUNDER:'SOUNDER',VELOCITY:'VELOCITY',HEADING:'HEADING',RADAR:'RADAR',WEATHER:'WEATHER',TRANSDUCER:'TRANSDUCER',OTROS:'OTHER'},"
       "es:{GPS:'GPS',AIS:'AIS',SOUNDER:'ECOSONDA',VELOCITY:'VELOCIDAD',HEADING:'RUMBO',RADAR:'RADAR',WEATHER:'METEO',TRANSDUCER:'TRANSDUCTOR',OTROS:'OTROS'},"
@@ -551,26 +543,13 @@ void handleMonitor(){
     "function applyLang(){document.getElementById('pauseBtn').innerText=paused?Lb[lang].resume:Lb[lang].pause;document.getElementById('clearBtn').innerText=Lb[lang].clear;drawFilters();}"
     "function drawFilters(){let c=document.getElementById('filterC');c.innerHTML='';filters.forEach(f=>{let b=document.createElement('button');b.type='button';b.className='fbtn '+f;if(filtersState[f])b.classList.add('active');b.innerText=cat[lang][f]||f;b.onclick=()=>{filtersState[f]=!filtersState[f];b.classList.toggle('active',filtersState[f]);};c.appendChild(b);});let all=document.createElement('button');all.type='button';all.className='fbtn';all.innerText='ALL/NONE';all.onclick=()=>{let any=Object.values(filtersState).some(v=>v);Object.keys(filtersState).forEach(k=>filtersState[k]=!any);drawFilters();};c.appendChild(all);}"
     "function togglePause(){paused=!paused;applyLang();fetch('/setmonitor?state='+(paused?0:1)).catch(()=>{});}"
-    "function clearConsole(){document.getElementById('console').innerHTML='';fetch('/clearnmea').catch(()=>{});} "
+    "function clearConsole(){document.getElementById('console').innerHTML='';fetch('/clearnmea').catch(()=>{});}"
     "async function setBaud(b){await fetch('/setbaud?baud='+b).catch(()=>{});document.querySelectorAll('.baud').forEach(x=>x.classList.remove('active'));let el=document.getElementById('baud_'+b);if(el)el.classList.add('active');}"
-    "function setSpeed(mult,btn){document.querySelectorAll('.btn').forEach(b=>{if(b.innerText.includes('%'))b.classList.remove('active');});btn.classList.add('active');intervalMs=Math.max(100,Math.round(1000/mult));if(intervalId)clearInterval(intervalId);intervalId=setInterval(poll,intervalMs);} "
-    // ——— CORREGIDO: render por-color usando <span class="TIPO"> ———
-    "function poll(){"
-      "if(paused)return;"
-      "fetch('/getnmea?ts='+Date.now()).then(r=>r.text()).then(t=>{"
-        "let c=document.getElementById('console');"
-        "let lines=t.trim()?t.trim().split('\\n'):[];"
-        "let visible=lines.filter(l=>{let lb=l.indexOf(']');let type=(lb>0&&l[0]=='[')?l.substring(1,lb):'OTROS';return filtersState[type];});"
-        "c.innerHTML=visible.map(l=>{"
-          "let lb=l.indexOf(']');"
-          "let type=(lb>0&&l[0]=='[')?l.substring(1,lb):'OTROS';"
-          "let disp=(cat[lang]&&cat[lang][type])?cat[lang][type]:type;"
-          "let rest=(lb>=0)?l.substring(lb+1):l;"
-          "return '<span class=\"'+type+'\">['+disp+']'+rest+'</span>';"
-        "}).join('<br>');"
-        "c.scrollTop=c.scrollHeight;"
-      "}).catch(()=>{});"
-    "}"
+    "function setSpeed(mult,btn){document.querySelectorAll('.btn').forEach(b=>{if(b.innerText.includes('%'))b.classList.remove('active');});btn.classList.add('active');intervalMs=Math.max(100,Math.round(1000/mult));if(intervalId)clearInterval(intervalId);intervalId=setInterval(poll,intervalMs);}"
+    "function poll(){if(paused)return;fetch('/getnmea?ts='+Date.now()).then(r=>r.text()).then(t=>{let c=document.getElementById('console');let lines=t.trim()?t.trim().split('\\n'):[];"
+      "let out=lines.map(l=>{if(!l)return'';let lb=l.indexOf(']');let typ=(lb>0&&l[0]=='[')?l.substring(1,lb):'OTROS';if(!filtersState[typ])return null;"
+      "let rest=(lb>=0)?l.substring(lb+1):l;return '<span class=\"'+typ+'\">['+(cat[lang][typ]||typ)+']'+rest+'</span>';}).filter(Boolean).join('<br>');"
+      "c.innerHTML=out;c.scrollTop=c.scrollHeight;}).catch(()=>{});}"
     "async function gotoGen(){paused=true;applyLang();try{await fetch('/setmonitor?state=0');await fetch('/setmode?m=generator');}catch(e){} location.href='/generator';}"
     "async function gotoMenu(){paused=true;try{await fetch('/setmonitor?state=0');await fetch('/togglegen?state=0');}catch(e){} location.href='/';}"
     "document.addEventListener('DOMContentLoaded',async()=>{await fetch('/setmode?m=monitor');try{const st=await (await fetch('/getstatus')).json();paused=!st.monRunning;applyLang();let b=document.getElementById('baud_'+(st.baud||4800));if(b)b.classList.add('active');}catch(e){applyLang();}intervalId=setInterval(poll,intervalMs);});"
@@ -657,7 +636,7 @@ void handleGenerator(){
   ".row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-start;justify-content:flex-start}"
   ".row>*{flex:1;min-width:220px;text-align:left}"
   ".row.spaceTop{margin-top:8px}"
-  ".btn{padding:10px;background:#111;color:#0f0;border:1px solid #0f0;border-radius:8px;font-size:16px;cursor:pointer;text-align:center}"
+  ".btn{padding:10px;background:#111;color:#0f0;border:1px solid #0f0;border-radius:8px;font-size:16px;cursor:pointer;text-align:center;display:inline-block;box-sizing:border-box;line-height:1.2}"
   ".btn.small{padding:6px 8px;font-size:14px;border-radius:6px}"
   ".btn.active{background:#0f0;color:#000;font-weight:bold}"
   "#genconsole{width:100%;box-sizing:border-box;height:40vh;overflow:auto;border:1px solid #0f0;padding:5px;background:#000;margin-top:10px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace}"
@@ -666,7 +645,7 @@ void handleGenerator(){
   ".btn-row .clear{flex:1}"
   ".btn-full{width:100%;display:block}"
   "footer{text-align:center;color:#666;font-size:12px;margin-top:10px}"
-  "a.btn{text-decoration:none;display:inline-block}"
+  "a.btn{text-decoration:none}"
   "</style></head><body>");
 
   html += "<h2 id='genTitle'>NMEA Generator</h2><div class='grid' id='slots'>";
@@ -754,30 +733,45 @@ void handleUpdatePage(){
   generatorRunning=false; monitorRunning=false;
   otaActive = true; // WARNING en OLED
 
-  String html = F("<!doctype html><html><head><meta charset='utf-8'><title>OTA Update</title>"
-  "<meta name='viewport' content='width=device-width, initial-scale=1.0'>"
-  "<style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,Noto Sans,Liberation Sans,sans-serif;background:#000;color:#0f0;margin:0;padding:10px}h2{text-align:center;color:#0ff;margin:8px 0}"
-  ".card{border:1px solid #0f0;border-radius:8px;padding:12px;background:#000;margin-top:10px}"
-  "input[type=file]{width:100%;box-sizing:border-box;padding:8px;background:#111;color:#0f0;border:1px solid #0f0;border-radius:8px}"
-  ".btn{padding:10px;background:#111;color:#0f0;border:1px solid #0f0;border-radius:8px;font-size:16px;cursor:pointer;text-align:center;display:inline-block;margin-top:8px}.btn-full{width:100%;display:block}"
-  "#status{margin-top:8px;color:#7fffd4}footer{text-align:center;color:#666;font-size:12px;margin-top:10px}"
-  ".warn{border:1px solid #ff0;color:#ff0;padding:8px;border-radius:8px;background:#111;margin-top:8px}"
-  "</style></head><body>");
-  html += "<h2 id='ttl'>OTA Update</h2>"
-          "<div class='warn'>⚠️ <b>Do not disconnect power</b> while the firmware is uploading.</div>"
-          "<div class='card'><p id='msg'>Select the firmware .bin file and upload. The device will reboot automatically.</p>"
-          "<input id='file' type='file' accept='.bin'><button type='button' class='btn btn-full' id='btnUp' onclick='doUpload()'>Upload</button><div id='status'></div></div>"
-          "<div class='card'><a class='btn btn-full' href='/' id='btnMenu'>🏠 Main Menu</a></div>";
-  html +=
+  // Contenedor verde y botón Main Menu igual al de Upload (mismo <button>, mismas clases)
+  String html = F(
+    "<!doctype html><html><head><meta charset='utf-8'><title>OTA Update</title>"
+    "<meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+    "<style>"
+      "body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,Noto Sans,Liberation Sans,sans-serif;background:#000;color:#0f0;margin:0;padding:0}"
+      ".wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;box-sizing:border-box}"
+      ".card{width:100%;max-width:680px;background:#002900;border:1px solid #0f0;border-radius:12px;padding:16px;box-sizing:border-box;margin:0 auto}"
+      "h2{text-align:center;color:#0ff;margin:8px 0 12px}"
+      ".warn{border:1px solid #ff0;color:#ff0;padding:8px;border-radius:8px;background:#111;margin:8px 0}"
+      "input[type=file]{width:100%;box-sizing:border-box;padding:8px;background:#111;color:#0f0;border:1px solid #0f0;border-radius:8px;margin:10px 0}"
+      ".btn{padding:10px;background:#111;color:#0f0;border:1px solid #0f0;border-radius:8px;font-size:16px;cursor:pointer;text-align:center;display:inline-block;box-sizing:border-box;line-height:1.2}"
+      ".btn:hover{background:#0f0;color:#000}"
+      ".btn-full{width:100%;display:block}"
+      "#status{margin-top:8px;color:#7fffd4;min-height:1.2em}"
+      "footer{text-align:center;color:#666;font-size:12px;margin-top:10px}"
+    "</style></head><body>"
+    "<div class='wrap'><div class='card'>"
+      "<h2 id='ttl'>OTA Update</h2>"
+      "<div class='warn'>⚠️ <b>Do not disconnect power</b> while the firmware is uploading.</div>"
+      "<input id='file' type='file' accept='.bin'>"
+      "<button type='button' class='btn btn-full' id='btnUp' onclick='doUpload()'>Upload</button>"
+      "<div id='status'></div>"
+      "<button type='button' class='btn btn-full' id='btnMenu' onclick=\"location.href='/'\">🏠 Main Menu</button>"
+      "<footer>© 2025 Matías Scuppa — by Themys</footer>"
+    "</div></div>"
     "<script>"
-    "let lang=localStorage.getItem('lang')||'en';const T={en:{title:'OTA Update',msg:'Select the firmware .bin file and upload. The device will reboot automatically.',upload:'Upload',menu:'🏠 Main Menu',ok:'Upload OK. Rebooting…',fail:'Upload failed.'},"
-    "es:{title:'Actualizar Firmware',msg:'Selecciona el archivo .bin y súbelo. El equipo se reiniciará automáticamente.',upload:'Subir',menu:'🏠 Menú Principal',ok:'Subida OK. Reiniciando…',fail:'Fallo en la subida.'},"
-    "fr:{title:'Mise à jour OTA',msg:'Sélectionnez le fichier .bin et téléversez-le. L’appareil redémarrera automatiquement.',upload:'Téléverser',menu:'🏠 Menu Principal',ok:'Téléversement OK. Redémarrage…',fail:'Échec du téléversement.'}};"
-    "function apply(){document.getElementById('ttl').innerText=T[lang].title;document.getElementById('msg').innerText=T[lang].msg;document.getElementById('btnUp').innerText=T[lang].upload;document.getElementById('btnMenu').innerText=T[lang].menu;}apply();"
-    "async function doUpload(){const f=document.getElementById('file').files[0];if(!f){document.getElementById('status').innerText='No file';return;}const fd=new FormData();fd.append('update',f,f.name);document.getElementById('status').innerText='Uploading…';try{const r=await fetch('/update',{method:'POST',body:fd});const t=await r.text();if(t.trim()==='OK'){document.getElementById('status').innerText=T[lang].ok;setTimeout(()=>{location.href='/'},8000);}else{document.getElementById('status').innerText=T[lang].fail+' ('+t+')';}}catch(e){document.getElementById('status').innerText=T[lang].fail;}}"
-    "</script><footer>© 2025 Matías Scuppa — by Themys</footer></body></html>";
+    "let lang=localStorage.getItem('lang')||'en';const T={"
+      "en:{title:'OTA Update',msg:'Select the firmware .bin file and upload. The device will reboot automatically.',upload:'Upload',menu:'🏠 Main Menu',ok:'Upload OK. Rebooting…',fail:'Upload failed.'},"
+      "es:{title:'Actualizar Firmware',msg:'Selecciona el archivo .bin y súbelo. El equipo se reiniciará automáticamente.',upload:'Subir',menu:'🏠 Menú Principal',ok:'Subida OK. Reiniciando…',fail:'Fallo en la subida.'},"
+      "fr:{title:'Mise à jour OTA',msg:'Sélectionnez le fichier .bin et téléversez-le. L’appareil redémarrera automatiquement.',upload:'Téléverser',menu:'🏠 Menu Principal',ok:'Téléversement OK. Redémarrage…',fail:'Échec du téléversement.'}"
+    "};"
+    "function apply(){document.getElementById('ttl').innerText=T[lang].title;document.getElementById('btnUp').innerText=T[lang].upload;document.getElementById('btnMenu').innerText=T[lang].menu;}apply();"
+    "function doUpload(){const f=document.getElementById('file').files[0];if(!f){document.getElementById('status').innerText='No file';return;}const fd=new FormData();fd.append('update',f,f.name);document.getElementById('status').innerText=T[lang].msg;fetch('/update',{method:'POST',body:fd}).then(r=>r.text()).then(t=>{if(t.trim()==='OK'){document.getElementById('status').innerText=T[lang].ok;setTimeout(()=>{location.href='/'},8000);}else{document.getElementById('status').innerText=T[lang].fail+' ('+t+')';}}).catch(()=>{document.getElementById('status').innerText=T[lang].fail;});}"
+    "</script></body></html>"
+  );
   noCache(); server.send(200,"text/html; charset=utf-8",html);
 }
+
 void handleUpdateUpload(){
   HTTPUpload& up=server.upload();
   if(up.status==UPLOAD_FILE_START){
@@ -810,7 +804,7 @@ void handleGetNMEA(){
   noCache(); server.send(200,"text/plain",out);
 }
 void handleSetBaud(){ noCache(); if(server.hasArg("baud")){ int b=server.arg("baud").toInt(); if(b==4800||b==9600||b==38400||b==115200) startSerial(b); server.send(200,"text/plain","OK"); } else server.send(400,"text/plain","Error"); }
-void handleClearNMEA(){ xSemaphoreTake(nmeaBufMutex,portMAX_DELAY); for(int i=0;i<BUFFER_LINES;i++) nmeaBuffer[i]=""; bufferIndex=0; currentLine=""; xSemaphoreGive(nmeaBufMutex); noCache(); server.send(200,"text/plain","OK"); }
+void handleClearNMEA(){ xSemaphoreTake(nmeaBufMutex,portMAX_DELAY); for(int i=0;i<BUFFER_LINES;i++) nmeaBuffer[i]=""; bufferIndex=0; currentLine=""; lineStartMs=0; xSemaphoreGive(nmeaBufMutex); noCache(); server.send(200,"text/plain","OK"); }
 
 int argIndex(){ if(!server.hasArg("i")) return -1; int i=server.arg("i").toInt(); if(i<0||i>=MAX_SLOTS) return -1; return i; }
 void handleGenSlotEnable(){ int i=argIndex(); if(i<0){server.send(400,"text/plain","Bad slot");return;} bool en=server.hasArg("en")&&(server.arg("en").toInt()==1); slots[i].enabled=en; server.send(200,"text/plain",en?"1":"0"); }
@@ -852,7 +846,7 @@ void drawRight(const char* text, int y, const uint8_t* font, int xRight=127){
   u8g2.drawStr(x, y, text);
 }
 
-// Splash centrado con panel y barra (y versión discreta abajo)
+// Splash centrado + versión (SOLO aquí)
 void drawSplash(uint32_t now){
   uint32_t elapsed = now - bootStartMs;
   if(elapsed > SPLASH_MS) elapsed = SPLASH_MS;
@@ -881,7 +875,7 @@ void drawSplash(uint32_t now){
   if(fill<0) fill=0;
   u8g2.drawBox(bx+1, by+1, fill, bh-2);
 
-  // Versión: abajo a la derecha, chico/disimulado
+  // Versión chiquita abajo a la derecha (solo en splash)
   drawRight(FW_VERSION, 63, FONT_HDR_SMALL);
 
   u8g2.sendBuffer();
@@ -892,7 +886,7 @@ inline bool recentTs(uint32_t ts, uint32_t windowMs){
   return (millis() - ts) <= windowMs;
 }
 
-// Header compacto: "Mode: MON/GEN" + "Baud: ####"
+// Header compacto
 void drawHeader(){
   const char* modeCode = (appMode==MODE_GENERATOR) ? "GEN" : "MON";
   char left[24];  snprintf(left,  sizeof(left),  "Mode: %s", modeCode);
@@ -911,7 +905,7 @@ void drawHeader(){
     return;
   }
 
-  // Fallback ultra compacto
+  // Ultra compacto
   const char* leftS  = (appMode==MODE_GENERATOR) ? "M: GEN" : "M: MON";
   char rightS[16]; snprintf(rightS, sizeof(rightS), "B: %d", currentBaud);
   u8g2.drawStr(0, 9, leftS);
@@ -925,6 +919,7 @@ void drawStatus(){
   if(otaActive){
     drawCentered("OTA UPDATE", 24, FONT_TITLE);
     drawCentered("DO NOT POWER OFF", 40, FONT_SUB);
+    // (SIN versión aquí)
     u8g2.sendBuffer();
     return;
   }
@@ -932,7 +927,7 @@ void drawStatus(){
   // Header
   drawHeader();
 
-  // ——— Zona de sensores ———
+  // Zona de sensores
   const int topY    = 18;
   const int bottomY = 60;  // 63 reservado para estado RUN/PAUSE
   const int colAX   = 2;
@@ -951,7 +946,6 @@ void drawStatus(){
         active[nActive++] = sensors[i].name;
   }
 
-  // Lista sólo si hay actividad reciente; si no, queda “en blanco”
   u8g2.setFont(FONT_LIST);
   if(nActive > 0){
     const int rowsPerCol = (nActive + 1) / 2;  // ceil(n/2)
@@ -960,12 +954,10 @@ void drawStatus(){
     int startY = topY + ((bottomY - topY) - blockH)/2;
     if(startY < topY) startY = topY;
 
-    // Columna A
     for(int i=0;i<rowsPerCol && i<nActive;i++){
       int y = startY + i*lineH;
       u8g2.drawStr(colAX, y, active[i]);
     }
-    // Columna B
     for(int i=rowsPerCol, r=0; i<nActive; ++i, ++r){
       int y = startY + r*lineH;
       u8g2.drawStr(colBX, y, active[i]);
@@ -976,6 +968,7 @@ void drawStatus(){
   const bool isRun = (appMode==MODE_MONITOR) ? monitorRunning : generatorRunning;
   drawRight(isRun ? "RUN" : "PAUSE", 63, FONT_LIST);
 
+  // (SIN versión aquí)
   u8g2.sendBuffer();
 }
 
@@ -987,13 +980,21 @@ void TaskNet(void*){
     vTaskDelay(1);
   }
 }
+
 void TaskNMEA(void*){
   for(;;){
-    // MONITOR: sólo procesa si está en RUN
     if(appMode==MODE_MONITOR && monitorRunning){
       xSemaphoreTake(serialMutex,portMAX_DELAY);
+
+      // Timeout de línea rota
+      if(currentLine.length()>0 && (millis() - lineStartMs) > LINE_TIMEOUT_MS){
+        currentLine = "";
+        lineStartMs = 0;
+      }
+
       while(NMEA_Serial.available()){
         char c=(char)NMEA_Serial.read();
+        if(lineStartMs==0) lineStartMs = millis();
 
         if(c=='\n' || c=='\r'){
           if(currentLine.length()==0) continue;
@@ -1002,11 +1003,12 @@ void TaskNMEA(void*){
 
           String raw=currentLine;
           currentLine="";
+          lineStartMs=0;
           raw.trim();
 
           if(raw.length()==0){ xSemaphoreTake(serialMutex,portMAX_DELAY); continue; }
 
-          // --- NUEVO: parseo TagBlock / UdPbC ---
+          // Parseo TagBlock / UdPbC
           String sentence, meta;
           bool hadTag=false, hadUdPbC=false;
           bool ok = parseNMEALine(raw, sentence, meta, hadTag, hadUdPbC);
@@ -1019,7 +1021,6 @@ void TaskNMEA(void*){
           String type=detectSentenceType(effective);
           if(valid && type!="OTROS"){ stampSeen(type); }
 
-          // Mostrar metadatos si hay
           String formatted="["+type+"] "+effective;
           if(hadTag || hadUdPbC){
             if(meta.length()==0){
@@ -1033,13 +1034,17 @@ void TaskNMEA(void*){
           nmeaBuffer[bufferIndex]=formatted;
           xSemaphoreGive(nmeaBufMutex);
 
-          // A la red mandamos la sentencia limpia (sin tag ni UdPbC)
           if(valid) sendUDP(effective);
 
           xSemaphoreTake(serialMutex,portMAX_DELAY);
         }
         else if(c>=32 && c<=126){
-          currentLine+=c;
+          if(currentLine.length() < MAX_LINE_LEN){
+            currentLine+=c;
+          } else {
+            currentLine="";
+            lineStartMs=0;
+          }
         }
       }
       xSemaphoreGive(serialMutex);
@@ -1055,7 +1060,7 @@ void TaskNMEA(void*){
           String out = slots[i].text.length()?slots[i].text:generateSentence(slots[i].sensor,slots[i].sentence);
           if(out.length()==0) continue;
 
-          stampGen(slots[i].sensor); // incluye CUSTOM
+          stampGen(slots[i].sensor);
 
           xSemaphoreTake(serialMutex,portMAX_DELAY);
           NMEA_Serial.println(out);
@@ -1091,7 +1096,6 @@ void setup(){
   Serial.setDebugOutput(false);
   esp_log_level_set("*", ESP_LOG_NONE);
 
-  // Bus SPI con tus pines
   SPI.end();
   SPI.begin(OLED_SCK, -1 /*MISO*/, OLED_MOSI, OLED_CS);
   u8g2.begin();
